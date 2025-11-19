@@ -1,11 +1,9 @@
-import sys
+import codecs
+import logging
 import os
 import re
-import logging
 import sys
-import codecs
 from typing import NoReturn
-from datetime import datetime
 
 from .release_parser import ReleaseParser, ReleaseInfo, TargetInfo
 from .gitlab_rep import GitlabRep
@@ -24,7 +22,25 @@ logger = logging.getLogger(__name__)
 # Set console encoding for proper Unicode output
 sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer)
 
-# ---------- validation helpers ----------
+
+def parse_args() -> tuple[str, str]:
+    if len(sys.argv) < 3:
+        print("Usage: python -m release_generator.release <path_to_release.json> <path_to_defs.h>")
+        sys.exit(1)
+
+    release_json_path = os.path.abspath(sys.argv[1])
+    defs_path = os.path.abspath(sys.argv[2])
+    return release_json_path, defs_path
+
+
+def require_token() -> str:
+    token = os.getenv("RELEASE_TOKEN")
+    if not token:
+        logger.error("Missing RELEASE_TOKEN in environment variables")
+        sys.exit(1)
+    return token
+
+
 _TAG_VRANGE_RE = re.compile(
     r"^v"
     r"(25[0-5]|2[0-4]\d|1\d\d|[1-9]\d?)\."   # first group (project ID)
@@ -160,168 +176,159 @@ def validate_tag(tag_name: str, rep: GitlabRep) -> None:
     logger.info("Tag validation passed and tag doesn't exist yet: %s", tag_name)
 
 
-def main() -> NoReturn:
-    if len(sys.argv) < 3:
-        print("Usage: python -m release_generator.release <path_to_release.json> <path_to_defs.h>")
-        sys.exit(1)
+def build_target(target: TargetInfo, info: ReleaseInfo, token: str, build_dir: str, rep: GitlabRep) -> list[str]:
+    validate_target(target.target_name)
+    validate_tag(target.tag_name, rep)
 
-    release_json_path = os.path.abspath(sys.argv[1])
-    defs_path = os.path.abspath(sys.argv[2])
-    token = os.getenv("RELEASE_TOKEN")
-    if not token:
-        logger.error("Missing RELEASE_TOKEN in environment variables")
-        sys.exit(1)
+    temp_info = ReleaseInfo(
+        git_project_id=info.git_project_id,
+        branch_name=info.branch_name,
+        is_service_firmware=info.is_service_firmware,
+        upgrade_to_release=info.upgrade_to_release,
+        features=info.features,
+        bug_fixes=info.bug_fixes,
+        targets=[target],
+    )
 
-    # 1. Parse configuration files
-    info = ReleaseParser(release_json_path, defs_path).parse()
+    build_rep = GitlabRep(GITLAB_URL, info.git_project_id, token, temp_info, build_dir)
+    build_rep.build_project()
 
-    # 2. Initialize repository and perform basic validations
-    build_dir = 'build'
-    rep = GitlabRep(GITLAB_URL, info.git_project_id, token, info, build_dir)
-    validate_branch(info)
+    return [
+        os.path.join(build_dir, f"{target.target_name}.bin"),
+        os.path.join(build_dir, f"{target.target_name}.map"),
+        os.path.join(build_dir, target.container_name),
+    ]
 
-    # 3. Process each target combination
-    all_binaries = []
+
+def commit_binaries(rep: GitlabRep, branch_name: str, binaries: list[str]) -> str:
+    if not binaries:
+        return rep.get_latest_commit_hash(branch_name)
+
+    repo_dir = os.getcwd()
+    commit_message = "feat(btl.bin): add firmware binaries"
+    return rep.commit_and_push_binaries(repo_dir, branch_name, binaries, commit_message)
+
+
+def write_email(artifacts_dir: str, info: ReleaseInfo, target: TargetInfo, rep: GitlabRep, suffix: str = "") -> None:
+    email_text = generate_release_email(info, target, rep)
+    email_file = os.path.join(artifacts_dir, f"release_email_{target.tag_name}{suffix}.txt")
+    with open(email_file, "w", encoding="utf-8") as f:
+        f.write(email_text)
+    logger.info("Generated release email: %s", email_file)
+
+
+def copy_artifacts(build_dir: str, artifacts_dir: str, target: TargetInfo) -> None:
+    for binary in [f"{target.target_name}.bin", f"{target.target_name}.map", target.container_name]:
+        src = os.path.join(build_dir, binary)
+        dst = os.path.join(artifacts_dir, binary)
+        if os.path.exists(src):
+            import shutil
+
+            shutil.copy2(src, dst)
+            logger.info("Copied %s to artifacts directory", binary)
+
+
+def push_to_firmware_store(build_dir: str, info: ReleaseInfo) -> None:
+    try:
+        fw_repo_url = os.getenv("FW_STORE_REPO_URL")
+        fw_token = os.getenv("FW_PUSH_TOKEN")
+        fw_branch = os.getenv("FW_STORE_BRANCH", "main")
+
+        if not info.targets:
+            logger.warning("No targets found for publishing to firmware store")
+            return
+
+        pusher = None
+        try:
+            if fw_repo_url and fw_token:
+                pusher = FirmwareStorePusher(fw_repo_url, fw_token, fw_branch)
+
+            for target in info.targets:
+                release_tag = target.tag_name + "-release"
+                files_to_push = collect_target_files(build_dir, [target])
+
+                if files_to_push and pusher:
+                    try:
+                        pusher.push_release(tag_name=release_tag, src_paths=files_to_push)
+                    except Exception as e:
+                        logger.error("Publish to firmware store failed for tag %s: %s", release_tag, e)
+                else:
+                    logger.warning(
+                        "Skip publish for tag %s (no files or credentials). Files: %d, URL set: %s",
+                        release_tag,
+                        len(files_to_push),
+                        bool(fw_repo_url),
+                    )
+        finally:
+            if pusher:
+                pusher.close()
+    except Exception as e:
+        logger.error("Publish to firmware store failed: %s", e)
+
+
+def handle_upgrade_release(info: ReleaseInfo, rep: GitlabRep, build_dir: str) -> None:
     for target in info.targets:
         logger.info("Processing target: %s", target.target_name)
 
-        if info.upgrade_to_release:
-            # For upgrade_to_release mode: verify beta-tag exists and create release-tag
-            beta_tag = target.tag_name
-            release_tag = beta_tag + "-release"
-            validate_tag(release_tag, rep)
+        beta_tag = target.tag_name
+        release_tag = beta_tag + "-release"
+        validate_tag(release_tag, rep)
 
-            existing_url = rep.get_tag(beta_tag)
-            if existing_url is None:
-                raise ValueError(f"Beta tag '{beta_tag}' not found")
+        existing_url = rep.get_tag(beta_tag)
+        if existing_url is None:
+            raise ValueError(f"Beta tag '{beta_tag}' not found")
 
-            # Get commit hash from beta-tag
-            commit_hash = rep.get_tag_commit_hash(beta_tag)
+        commit_hash = rep.get_tag_commit_hash(beta_tag)
+        GeneratorTag(rep, release_tag, info.features, info.bug_fixes, commit_hash).generate()
 
-            # Create release-tag on the same commit
-            GeneratorTag(rep, release_tag, info.features, info.bug_fixes, commit_hash).generate()
-            continue
+    new_branch = f"feature/changelog-update-{info.targets[0].tag_name}-release"
+    commit_message = f"docs(changelog): update for release {info.targets[0].tag_name}"
+    ChangelogGenerator().update_changelog_and_push(info, rep, new_branch, commit_message)
 
-        # Validate target and tag for normal mode
-        validate_target(target.target_name)
-        validate_tag(target.tag_name, rep)
+    artifacts_dir = os.path.join(build_dir, 'artifacts')
+    os.makedirs(artifacts_dir, exist_ok=True)
+    for target in info.targets:
+        write_email(artifacts_dir, info, target, rep, suffix="-release")
 
-        # 4. Build for current target
-        temp_info = ReleaseInfo(
-            git_project_id=info.git_project_id,
-            branch_name=info.branch_name,
-            is_service_firmware=info.is_service_firmware,
-            upgrade_to_release=info.upgrade_to_release,
-            features=info.features,
-            bug_fixes=info.bug_fixes,
-            targets=[target]  # only the current target
-            )
+    logger.info("All release artifacts are saved in: %s", artifacts_dir)
+    push_to_firmware_store(build_dir, info)
+    sys.exit(0)
 
-        build_rep = GitlabRep(GITLAB_URL, info.git_project_id, token, temp_info, build_dir)
-        build_rep.build_project()
 
-        # Add binaries to the common list
-        bin_name = os.path.join(build_dir, f"{target.target_name}.bin")
-        map_name = os.path.join(build_dir, f"{target.target_name}.map")
-        container_name = os.path.join(build_dir, target.container_name)
-        all_binaries.extend([bin_name, map_name, container_name])
+def handle_standard_release(info: ReleaseInfo, token: str, build_dir: str, rep: GitlabRep) -> None:
+    all_binaries: list[str] = []
+    for target in info.targets:
+        logger.info("Processing target: %s", target.target_name)
+        all_binaries.extend(build_target(target, info, token, build_dir, rep))
 
-    # 5*. Update changelog, generate email texts and push release binaries to 
-    #     a firmware storage repository
-    if info.upgrade_to_release:
-        # 5.1 Update changelog
-        # Create a new branch name for changelog update
-        new_branch = f"feature/changelog-update-{info.targets[0].tag_name}-release"
+    release_commit_hash = commit_binaries(rep, info.branch_name, all_binaries)
 
-        # Commit message for changelog changes
-        commit_message = f"docs(changelog): update for release {info.targets[0].tag_name}"
-
-        # Update CHANGELOG.md
-        ChangelogGenerator().update_changelog_and_push(info, rep, new_branch, commit_message)
-
-        # 5.2 Generate release email and save to file
-        artifacts_dir = os.path.join(build_dir, 'artifacts')
-        os.makedirs(artifacts_dir, exist_ok=True)
-        for target in info.targets:
-            email_text = generate_release_email(info, target, rep)
-            email_file = os.path.join(artifacts_dir, f"release_email_{target.tag_name}-release.txt")
-            with open(email_file, "w", encoding="utf-8") as f:
-                f.write(email_text)
-            logger.info(f"Generated release email: {email_file}")
-
-        logger.info(f"All release artifacts are saved in: {artifacts_dir}")
-
-        # 5.3 push release binaries to a firmware storage repository
-        try:
-            fw_repo_url = os.getenv("FW_STORE_REPO_URL")
-            fw_token    = os.getenv("FW_PUSH_TOKEN")
-            fw_branch   = os.getenv("FW_STORE_BRANCH", "main")
-
-            if not info.targets:
-                logger.warning("No targets found for publishing to firmware store")
-            else:
-                # create a single pusher and reuse it for all targets
-                pusher = None
-                try:
-                    if fw_repo_url and fw_token:
-                        pusher = FirmwareStorePusher(fw_repo_url, fw_token, fw_branch)
-
-                    for target in info.targets:
-                        release_tag = target.tag_name + "-release"  # folder = this tag
-                        # collect only files for this target
-                        files_to_push = collect_target_files(build_dir, [target])
-
-                        if files_to_push and pusher:
-                            try:
-                                pusher.push_release(tag_name=release_tag, src_paths=files_to_push)
-                            except Exception as e:
-                                logger.error("Publish to firmware store failed for tag %s: %s", release_tag, e)
-                        else:
-                            logger.warning(
-                                "Skip publish for tag %s (no files or credentials). Files: %d, URL set: %s",
-                                release_tag, len(files_to_push), bool(fw_repo_url)
-                            )
-                finally:
-                    if pusher:
-                        pusher.close()
-        except Exception as e:
-            logger.error("Publish to firmware store failed: %s", e)
-
-        sys.exit(0)
-
-    # 5. Commit all binaries together
-    if all_binaries:
-        repo_dir = os.getcwd()
-        commit_message = f"feat(btl.bin): add firmware binaries"
-        release_commit_hash = rep.commit_and_push_binaries(repo_dir, info.branch_name, all_binaries, commit_message)
-    else:
-        release_commit_hash = rep.get_latest_commit_hash(info.branch_name)
-
-    # 6. Create tags for each target and generate release emails
     artifacts_dir = os.path.join(build_dir, 'artifacts')
     os.makedirs(artifacts_dir, exist_ok=True)
 
     for target in info.targets:
         GeneratorTag(rep, target.tag_name, info.features, info.bug_fixes, release_commit_hash).generate()
+        write_email(artifacts_dir, info, target, rep)
+        copy_artifacts(build_dir, artifacts_dir, target)
 
-        # Generate release email and save to file
-        email_text = generate_release_email(info, target, rep)
-        email_file = os.path.join(artifacts_dir, f"release_email_{target.tag_name}.txt")
-        with open(email_file, "w", encoding="utf-8") as f:
-            f.write(email_text)
-        logger.info(f"Generated release email: {email_file}")
-
-        # Copy binaries to artifacts directory
-        for binary in [f"{target.target_name}.bin", f"{target.target_name}.map", target.container_name]:
-            src = os.path.join(build_dir, binary)
-            dst = os.path.join(artifacts_dir, binary)
-            if os.path.exists(src):
-                import shutil
-                shutil.copy2(src, dst)
-                logger.info(f"Copied {binary} to artifacts directory")
-
-    logger.info(f"All release artifacts are saved in: {artifacts_dir}")
+    logger.info("All release artifacts are saved in: %s", artifacts_dir)
     sys.exit(0)
+
+
+def main() -> NoReturn:
+    release_json_path, defs_path = parse_args()
+    token = require_token()
+
+    info = ReleaseParser(release_json_path, defs_path).parse()
+    build_dir = 'build'
+    rep = GitlabRep(GITLAB_URL, info.git_project_id, token, info, build_dir)
+
+    validate_branch(info)
+
+    if info.upgrade_to_release:
+        handle_upgrade_release(info, rep, build_dir)
+
+    handle_standard_release(info, token, build_dir, rep)
 
 
 if __name__ == '__main__':
