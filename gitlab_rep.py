@@ -26,8 +26,8 @@ class GitlabRep:
 
     def get_tag_commit_hash(self, tag_name: str) -> str:
         """
-        Возвращает хеш коммита для указанного тега.
-        Raises GitlabGetError если тег не найден.
+        Returns the commit hash for the specified tag.
+        Raises GitlabGetError if tag is not found.
         """
         project = self.get_project_obj()
         tag = project.tags.get(tag_name)
@@ -35,7 +35,7 @@ class GitlabRep:
 
     def get_tag(self, name: str) -> Optional[str]:
         """
-        Возвращает URL браузерного просмотра тега или None, если тега нет.
+        Returns the URL for browser tag view or None if tag doesn't exist.
         """
         project = self.get_project_obj()
         try:
@@ -44,7 +44,7 @@ class GitlabRep:
             logger.info("Tag '%s' not found.", name)
             return None
 
-        # Можно распарсить дату при необходимости
+        # The date can be parsed if required
         dt_str = tag.commit['created_at']
         try:
             parsed = datetime.strptime(dt_str, '%Y-%m-%dT%H:%M:%S.%f%z')
@@ -66,7 +66,7 @@ class GitlabRep:
 
     def build_project(self) -> None:
         """
-        Сборка проекта (CMake+Ninja), опционально SERVICE_FIRMWARE.
+        Project build (CMake+Ninja), optionally with SERVICE_FIRMWARE.
         """
         logger.info("Configuring CMake...")
         subprocess.run(["cmake", "-B", self.__build_dir, "-G", "Ninja"], check=True)
@@ -81,7 +81,7 @@ class GitlabRep:
         if not self.__release_info.targets:
             raise ValueError("No targets specified for build")
 
-        # В этой версии билдим только первый target из списка
+        # In this version, we only build the first target from the list
         target = self.__release_info.targets[0]
         logger.info("Building target: %s", target.target_name)
         subprocess.run(["cmake", "--build", self.__build_dir, f"--target={target.target_name}"], check=True)
@@ -90,7 +90,7 @@ class GitlabRep:
 
     def commit_and_push_binaries(self, repo_dir: str, branch: str, binaries: List[str], commit_message: str) -> str:
         """
-        Коммит и пуш бинарников в заданную ветку. Возвращает SHA коммита.
+        Commit and push binaries to the specified branch. Returns the commit SHA.
         """
         project = self.get_project_obj()
 
@@ -104,28 +104,28 @@ class GitlabRep:
         subprocess.run(['git', 'config', 'user.email', user_email], check=True, cwd=repo_dir)
         subprocess.run(['git', 'config', 'user.name', user_name], check=True, cwd=repo_dir)
 
-        # remote: гарантированно обновим (remove -> add)
+        # Update remote: ensure it's fresh (remove then add)
         subprocess.run(['git', 'remote', 'remove', 'gitlab_origin'], cwd=repo_dir, check=False)
         subprocess.run(['git', 'remote', 'add', 'gitlab_origin', authenticated_repo_url], check=True, cwd=repo_dir)
 
-        # add
+        # Stage binaries
         for binary in binaries:
             logger.info("Adding file: %s", binary)
             subprocess.run(['git', 'add', binary], check=True, cwd=repo_dir)
 
-        # если нечего коммитить — не падаем
+        # Skip commit if no changes are staged
         status = subprocess.run(['git', 'diff', '--cached', '--quiet'], cwd=repo_dir)
         if status.returncode == 0:
             logger.info("No staged changes; skipping commit. Using current HEAD hash.")
         else:
             subprocess.run(['git', 'commit', '-m', commit_message], check=True, cwd=repo_dir)
 
-        # получаем hash
+        # Get current commit hash
         result = subprocess.run(['git', 'rev-parse', 'HEAD'], check=True, cwd=repo_dir, capture_output=True, text=True)
         commit_hash = result.stdout.strip()
         logger.info("Local commit hash: %s", commit_hash)
 
-        # push
+        # Push to remote branch
         subprocess.run(['git', 'push', 'gitlab_origin', f'HEAD:{branch}'], check=True, cwd=repo_dir)
         logger.info("Pushed to %s:%s", 'gitlab_origin', branch)
 
@@ -196,7 +196,7 @@ class GitlabRep:
 
     def get_latest_commit_hash(self, branch_name: str) -> str:
         """
-        Возвращает SHA последнего коммита в указанной ветке (через GitLab API).
+        Returns SHA of the latest commit in the specified branch (via GitLab API).
         """
         project = self.get_project_obj()
         branch = project.branches.get(branch_name)
@@ -206,13 +206,14 @@ class GitlabRep:
 
     def get_project_url(self) -> str:
         """
-        Возвращает URL проекта в GitLab.
+        Returns the project URL in GitLab.
         """
-        return f"{self._gitlab_url}{self._project_id}"
+        project = self.get_project_obj()
+        return f"{project.web_url}"
 
     def create_branch(self, branch_name: str) -> None:
         """
-        Создает новую ветку из текущего состояния main/master.
+        Creates a new branch from the current state of main/master.
         """
         project = self.get_project_obj()
         try:

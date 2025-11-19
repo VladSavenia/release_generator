@@ -13,7 +13,7 @@ class GeneratorTag:
 
     def generate(self) -> str:
         """
-        Создаёт тег, если его ещё нет. Возвращает URL просмотра тега.
+        Creates a tag if it doesn't exist yet. Returns the tag view URL.
         """
         description_parts: List[str] = []
 

@@ -28,8 +28,8 @@ class ReleaseInfo:
 
 class ReleaseParser:
     """
-    Парсер: отвечает только за загрузку входных данных и извлечение версий из defs.h.
-    Форматирование тегов/контейнера делегировано ReleaseFormatter.
+    Parser: responsible only for loading input data and extracting versions from defs.h.
+    Tag/container formatting is delegated to ReleaseFormatter.
     """
 
     def __init__(self, json_file_path: str, defs_file_path: str):
@@ -40,7 +40,7 @@ class ReleaseParser:
         with open(self._json_file_path, encoding="utf-8") as f:
             json_data = json.load(f)
 
-        # обязательные поля JSON
+        # Required JSON fields
         required = ['cmake_project_name', 'git_project_id', 'branch_name', 'targets']
         for field in required:
             if field not in json_data:
@@ -52,13 +52,13 @@ class ReleaseParser:
         # defs.h
         defs_data = self.parse_defs(self._defs_file_path)
 
-        # Создаем объекты TargetInfo для каждой комбинации hard_num/variant_num
+        # Create TargetInfo objects for each hard_num/variant_num combination
         targets = []
         for target in json_data['targets']:
             if 'hard_num' not in target or 'variant_num' not in target:
                 raise ValueError("Each target must have 'hard_num' and 'variant_num'")
 
-            # Создаем копию json_data для каждого target, обновляя hard_num и variant_num
+            # Create a copy of json_data for each target, updating hard_num and variant_num
             target_json = json_data.copy()
             target_json.update(target)
 
@@ -85,11 +85,11 @@ class ReleaseParser:
         )
 
     def parse_defs(self, defs_path: str) -> Dict[str, int]:
-        """Парсит defs.h и возвращает словарь версий"""
+        """Parses defs.h and returns a dictionary of versions"""
         text = Path(defs_path).read_text(encoding="utf-8")
 
         def get_define(name: str) -> int:
-            # захватывает и вариантов с #define NAME (123)
+            # Captures variants with #define NAME (123) as well
             pattern = rf"#define\s+{name}\s+\(?(\d+)\)?"
             m = re.search(pattern, text)
             if not m:

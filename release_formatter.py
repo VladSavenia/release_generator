@@ -11,8 +11,8 @@ def _calc_minor(variant_num: int, minor_ver: int) -> int:
 
 class ReleaseFormatter:
     """
-    Единая точка генерации релизных строк (тег, имя контейнера) и их валидации.
-    Принимает исходные словари json/defs, чтобы не привязываться к внутренностям ReleaseInfo.
+    Single point of generation for release strings (tag, container name) and their validation.
+    Takes source json/defs dictionaries to avoid dependency on ReleaseInfo internals.
     """
 
     @staticmethod
@@ -23,7 +23,7 @@ class ReleaseFormatter:
         hard_num     = int(json_data["hard_num"])
         variant_num  = int(json_data["variant_num"])
 
-         # формируем revision_ver
+         # generate revision_ver
         is_service_firmware=json_data.get("is_service_firmware", False)
         if is_service_firmware:
             revision_ver = 255

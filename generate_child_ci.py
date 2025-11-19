@@ -16,6 +16,11 @@ tag-only:
     - git submodule update --init --depth 1 .\\script\\release_generator\\
     - python -m pip install -r .\\script\\release_generator\\requirements.txt
     - python -m script.release_generator.release .\\release.json .\\Project\\version\\defs.h
+  artifacts:
+    paths:
+      - build/artifacts/
+    expire_in: 1 week
+    when: on_success
 """
 
 BUILD_TEMPLATE = """\
@@ -32,16 +37,21 @@ build-and-push-job:
   script:
     - python -m pip install -r .\\script\\release_generator\\requirements.txt
     - python -m script.release_generator.release .\\release.json .\\Project\\version\\defs.h
+  artifacts:
+    paths:
+      - build/artifacts/
+    expire_in: 1 week
+    when: on_success
 """
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--release-json", default="release.json")
     ap.add_argument("--out", default="generated-ci.yml")
-    ap.add_argument("--override", choices=["tag-only", "build"], help="форсировать режим")
+    ap.add_argument("--override", choices=["tag-only", "build"], help="force mode")
     args = ap.parse_args()
 
-    # читаем release.json
+    # Reading release.json
     p = pathlib.Path(args.release_json)
     if not p.exists():
         print(f"ERROR: {p} not found", file=sys.stderr)

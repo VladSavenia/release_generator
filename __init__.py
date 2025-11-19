@@ -1,1 +1,1 @@
-# пустой (но обязателен для пакета)
+# empty (but required for the package)

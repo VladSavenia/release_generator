@@ -32,7 +32,7 @@ class ChangelogGenerator:
         """Format a task with Jira hyperlink."""
         match = JIRA_TASK_PATTERN.search(description)
         if not match:
-            # Если задача не найдена, просто возвращаем исходный текст
+            # If task is not found, just return the original text
             return f"- {description}"
         task_id = match.group(1)
         return f"- [[{task_id}]({JIRA_BASE_URL}/{task_id})] {description.replace(f'[{task_id}]', '').strip()}"
@@ -91,7 +91,7 @@ class ChangelogGenerator:
                     new_entries.append("Version related with tasks:")
                     sorted_tasks = sorted(all_tasks)
                     for i, task in enumerate(sorted_tasks):
-                        if i == len(sorted_tasks) - 1:  # последний элемент
+                        if i == len(sorted_tasks) - 1:  # last element
                             new_entries.append(f"`{task}`")
                         else:
                             new_entries.append(f"`{task}`, ")

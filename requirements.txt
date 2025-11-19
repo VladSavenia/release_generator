@@ -1,7 +1,2 @@
 python-gitlab>=4.4,<5
 python-dotenv>=1.0,<2
-
-# Development dependencies
-pytest>=7.0.0
-pytest-cov>=4.0.0
-coverage>=7.0.0
