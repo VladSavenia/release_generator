@@ -98,9 +98,21 @@ def generate_release_email(info: ReleaseInfo, target: TargetInfo, rep: GitlabRep
     tag_name = target.tag_name + "-release" if info.upgrade_to_release else target.tag_name
 
     # Generate email text
+    # Prefer firmware storage repo for direct links to binaries/containers when configured
+    fw_repo = os.getenv("FW_STORE_REPO_URL", "").rstrip('.git')
+    fw_branch = os.getenv("FW_STORE_BRANCH", "dev")
+    if fw_repo:
+        bin_link = f"{fw_repo}/-/blob/{fw_branch}/{tag_name}/{target.target_name}.bin"
+        container_link = f"{fw_repo}/-/blob/{fw_branch}/{tag_name}/{target.container_name}"
+        changelog_link = f"{fw_repo}/-/blob/{fw_branch}/CHANGELOG.md"
+    else:
+        bin_link = f"{repo_url}/-/blob/{tag_name}/build/{target.target_name}.bin"
+        container_link = f"{repo_url}/-/blob/{tag_name}/build/{target.container_name}"
+        changelog_link = f"{repo_url}/-/blob/dev/CHANGELOG.md"
+
     # Include changelog link only for upgrade-to-release flows (we update changelog in those cases)
     changelog_section = (
-        f"Ссылка на CHANGELOG.md:\n{repo_url}/-/blob/dev/CHANGELOG.md\n\n"
+        f"Ссылка на CHANGELOG.md:\n{changelog_link}\n\n"
         if info.upgrade_to_release
         else ""
     )
@@ -118,10 +130,10 @@ Bug Fixes:
 {repo_url}/-/tags/{tag_name}
 
 Ссылка на бинарный файл прошивки (*.bin):
-{repo_url}/-/blob/{tag_name}/build/{target.target_name}.bin
+{bin_link}
 
 Ссылка на файл контейнера для обновления прошивки (*.btl.bin):
-{repo_url}/-/blob/{tag_name}/build/{target.container_name}
+{container_link}
 
 Задачи в рамках которых делалась прошивка:
 {', '.join(sorted(all_tasks))}
@@ -253,9 +265,10 @@ def main() -> NoReturn:
 
         # 5.3 push release binaries to a firmware storage repository
         try:
-            fw_repo_url = os.getenv("FW_STORE_REPO_URL")
-            fw_token    = os.getenv("FW_PUSH_TOKEN")
-            fw_branch   = os.getenv("FW_STORE_BRANCH", "main")
+            fw_repo_url   = os.getenv("FW_STORE_REPO_URL")
+            fw_token      = os.getenv("FW_PUSH_TOKEN")
+            fw_branch     = os.getenv("FW_STORE_BRANCH", "dev")
+            fw_project_id = int(os.getenv("FW_STORE_PROJECT_ID", "0"))
 
             if not info.targets:
                 logger.warning("No targets found for publishing to firmware store")
@@ -273,7 +286,7 @@ def main() -> NoReturn:
 
                         if files_to_push and pusher:
                             try:
-                                pusher.push_release(tag_name=release_tag, src_paths=files_to_push)
+                                pusher.push_release(info, tag_name=release_tag, src_paths=files_to_push)
                             except Exception as e:
                                 logger.error("Publish to firmware store failed for tag %s: %s", release_tag, e)
                         else:
@@ -281,6 +294,11 @@ def main() -> NoReturn:
                                 "Skip publish for tag %s (no files or credentials). Files: %d, URL set: %s",
                                 release_tag, len(files_to_push), bool(fw_repo_url)
                             )
+
+                    if fw_token and fw_project_id:
+                        branch_for_changelog_upd = f"feature/changelog-update-{info.targets[0].tag_name}-release"
+                        rep = GitlabRep(GITLAB_URL, fw_project_id, fw_token, info, build_dir)
+                        ChangelogGenerator().update_changelog_and_push(info, rep, branch_for_changelog_upd, commit_message="docs: update changelog for new release")
                 finally:
                     if pusher:
                         pusher.close()
@@ -297,21 +315,21 @@ def main() -> NoReturn:
     else:
         release_commit_hash = rep.get_latest_commit_hash(info.branch_name)
 
-    # 6. Create tags for each target and generate release emails
+    # 6. Create tags for each target, generate release emails and push binaries to firmware storage repo
     artifacts_dir = os.path.join(build_dir, 'artifacts')
     os.makedirs(artifacts_dir, exist_ok=True)
 
     for target in info.targets:
         GeneratorTag(rep, target.tag_name, info.features, info.bug_fixes, release_commit_hash).generate()
 
-        # Generate release email and save to file
+        # 6.1 Generate release email and save to file
         email_text = generate_release_email(info, target, rep)
         email_file = os.path.join(artifacts_dir, f"release_email_{target.tag_name}.txt")
         with open(email_file, "w", encoding="utf-8") as f:
             f.write(email_text)
         logger.info(f"Generated release email: {email_file}")
 
-        # Copy binaries to artifacts directory
+        # 6.2 Copy binaries to artifacts directory
         for binary in [f"{target.target_name}.bin", f"{target.target_name}.map", target.container_name]:
             src = os.path.join(build_dir, binary)
             dst = os.path.join(artifacts_dir, binary)
@@ -321,6 +339,43 @@ def main() -> NoReturn:
                 logger.info(f"Copied {binary} to artifacts directory")
 
     logger.info(f"All release artifacts are saved in: {artifacts_dir}")
+
+    # 6.3 push release binaries to a firmware storage repository
+    try:
+        fw_repo_url   = os.getenv("FW_STORE_REPO_URL")
+        fw_token      = os.getenv("FW_PUSH_TOKEN")
+        fw_branch     = os.getenv("FW_STORE_BRANCH", "dev")
+
+        if not info.targets:
+            logger.warning("No targets found for publishing to firmware store")
+        else:
+            # create a single pusher and reuse it for all targets
+            pusher = None
+            try:
+                if fw_repo_url and fw_token:
+                    pusher = FirmwareStorePusher(fw_repo_url, fw_token, fw_branch)
+
+                for target in info.targets:
+                    release_tag = target.tag_name  # folder = this tag
+                    # collect only files for this target
+                    files_to_push = collect_target_files(build_dir, [target])
+
+                    if files_to_push and pusher:
+                        try:
+                            pusher.push_release(info, tag_name=release_tag, src_paths=files_to_push)
+                        except Exception as e:
+                            logger.error("Publish to firmware store failed for tag %s: %s", release_tag, e)
+                    else:
+                        logger.warning(
+                            "Skip publish for tag %s (no files or credentials). Files: %d, URL set: %s",
+                            release_tag, len(files_to_push), bool(fw_repo_url)
+                        )
+            finally:
+                if pusher:
+                    pusher.close()
+    except Exception as e:
+        logger.error("Publish to firmware store failed: %s", e)
+
     sys.exit(0)
 
 

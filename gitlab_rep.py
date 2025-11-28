@@ -232,3 +232,26 @@ class GitlabRep:
         except Exception as e:
             logger.error(f"Failed to create branch {branch_name}: {e}")
             raise
+
+    def merge_request_to_default(self, merge_request_title, source_branch_name, user_assignee_id=None):
+        project = self.get_project_obj()
+        try:
+            if user_assignee_id is not None:
+                project.mergerequests.create(
+                    {
+                        "source_branch": source_branch_name,
+                        "target_branch": project.default_branch,
+                        "title": merge_request_title,
+                        "assignee_id": user_assignee_id,
+                    }
+                )
+            else:
+                project.mergerequests.create(
+                    {
+                        "source_branch": source_branch_name,
+                        "target_branch": project.default_branch,
+                        "title": merge_request_title,
+                    }
+                )
+        except gitlab.exceptions.GitlabCreateError:
+            pass

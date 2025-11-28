@@ -7,10 +7,16 @@ import hashlib
 import json
 import threading
 from datetime import datetime
+import re
+from typing import List, Set
+
+from .release_parser import ReleaseInfo
 
 # ---------- logging ----------
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+JIRA_TASK_PATTERN = re.compile(r'\[([\w\-]+)\]')
 
 class FirmwareStorePusher:
     """
@@ -69,7 +75,37 @@ class FirmwareStorePusher:
             entry['tmp'] = tmp
             return tmp
 
-    def push_release(self, tag_name: str, src_paths: list[str]) -> None:
+    def _write_checksums(self, dest_dir: str) -> None:
+        """Write checksums for files in dest_dir and append checksum of the checksums file itself.
+
+        The method computes SHA256 for all files in the directory except `checksums.txt`,
+        writes those hashes to `checksums.txt`, then computes SHA256 of the written
+        `checksums.txt` and appends that hash as the final line.
+        """
+        # checksums: compute hashes for files in the directory, excluding the checksum file itself
+        filenames = [f for f in sorted(os.listdir(dest_dir)) if f != "checksums.txt"]
+        checksums_path = os.path.join(dest_dir, "checksums.txt")
+        # Write hashes for all files except checksums.txt
+        with open(checksums_path, "w", encoding="utf-8") as ch:
+            for fname in filenames:
+                full = os.path.join(dest_dir, fname)
+                if os.path.isfile(full):
+                    h = hashlib.sha256()
+                    with open(full, "rb") as f:
+                        for chunk in iter(lambda: f.read(65536), b""):
+                            h.update(chunk)
+                    ch.write(f"{h.hexdigest()}  {fname}\n")
+
+    def _extract_jira_tasks(self, items: List[str]) -> Set[str]:
+        """Extract unique Jira task IDs from a list of strings."""
+        tasks = set()
+        for item in items:
+            match = JIRA_TASK_PATTERN.search(item)
+            if match:
+                tasks.add(match.group(1))
+        return tasks
+
+    def push_release(self, info: ReleaseInfo, tag_name: str, src_paths: list[str]) -> None:
         """
         Copy files into <tag_name>/ inside the parsed/reused clone, commit and push.
         Can be called multiple times — the clone will be created only once for the same (repo, branch) pair.
@@ -94,17 +130,8 @@ class FirmwareStorePusher:
         if copied == 0:
             logger.warning("No files were copied for tag %s", tag_name)
 
-        # checksums
-        checksums_path = os.path.join(dest_dir, "checksums.txt")
-        with open(checksums_path, "w", encoding="utf-8") as ch:
-            for fname in sorted(os.listdir(dest_dir)):
-                full = os.path.join(dest_dir, fname)
-                if os.path.isfile(full):
-                    h = hashlib.sha256()
-                    with open(full, "rb") as f:
-                        for chunk in iter(lambda: f.read(65536), b""):
-                            h.update(chunk)
-                    ch.write(f"{h.hexdigest()}  {fname}\n")
+        # write checksums and include checksum for checksums.txt itself
+        self._write_checksums(dest_dir)
 
         # build-info
         build_info = {
@@ -124,7 +151,20 @@ class FirmwareStorePusher:
             logger.info("No changes to commit for tag %s", tag_name)
             return
 
-        msg = f"Add release binaries for {tag_name}"
+        # Build extended commit message and include JIRA references when available.
+        # Collect JIRA IDs from several sources and append lines like "Refs: JRA-123".
+        feature_tasks = self._extract_jira_tasks(info.features)
+        bugfix_tasks = self._extract_jira_tasks(info.bug_fixes)
+        jira_ids = feature_tasks.union(bugfix_tasks)
+
+        # Build commit message: first line summary, then one or more Refs lines.
+        lines = [f"Add release binaries for {tag_name}"]
+        if jira_ids:
+            lines.append("")
+            for jid in sorted(jira_ids):
+                lines.append(f"Refs: {jid}")
+
+        msg = "\n".join(lines)
         self._run(["git", "commit", "-m", msg], cwd=tmp)
         self._run(["git", "push", "origin", f"HEAD:{self.branch}"], cwd=tmp)
         logger.info("Firmware published to store under folder: %s", tag_name)
